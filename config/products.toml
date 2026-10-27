@@ -1,0 +1,8 @@
+# 各商品在公槽的根目錄：<根目錄>\<TDCC>\<TDCC>_TS.pdf、<TDCC>_IIS.pdf
+# 空白的請在視窗上按「選擇…」設定，會記在本機 .local/settings.json（不進 Git），優先於這裡。
+# 要新增商品：在這裡加一行，或直接在視窗的商品欄輸入新名稱。
+
+[roots]
+FCN = ""
+DACN = ""
+SUPERBALL = ""

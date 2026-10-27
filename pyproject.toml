@@ -1,0 +1,10 @@
+[project]
+name = "ts-iis-fetcher"
+version = "0.1.0"
+description = "依 TDCC 從公槽抓取說明書（_TS）與投資人須知（_IIS）"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
