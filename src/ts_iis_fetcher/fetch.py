@@ -1,8 +1,7 @@
 """依 TDCC 到公槽根目錄找說明書（_TS）與投資人須知（_IIS），複製到目的資料夾。
 
-公槽的擺法：`<根目錄>\\<TDCC>\\<TDCC>_TS.pdf`、`<TDCC>_IIS.pdf`。
-- 資料夾名稱剛好是 TDCC 優先；沒有時接受「以 TDCC 開頭」的資料夾（例：`029199990001 某某`），多個就不猜。
-- 檔名剛好是 `<TDCC>_TS.pdf`／`<TDCC>_IIS.pdf`；資料夾第一層沒有時往下層找，找到多份就不猜。
+跟 FCN Workflow「準備」找商品資料夾的做法一樣：根目錄底下任何深度、名稱剛好等於 TDCC 的資料夾（只走一次樹），
+找到多個同名資料夾就不猜。資料夾裡的檔名剛好是 `<TDCC>_TS.pdf`／`<TDCC>_IIS.pdf`；第一層沒有時往下層找，找到多份就不猜。
 """
 
 from __future__ import annotations
@@ -10,13 +9,12 @@ from __future__ import annotations
 import os
 import re
 import shutil
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 KINDS = ("TS", "IIS")
 _CODE = re.compile(r"(?<!\d)\d{11,12}(?!\d)")
-_FOLDER = re.compile(r"\d{12}(?!\d)")
 
 
 def parse_tdccs(text: str) -> list[str]:
@@ -57,31 +55,32 @@ class Lookup:
         return "完成" if self.ok else "；".join(self.problems)
 
 
-def folders_by_code(root: Path) -> dict[str, list[Path]]:
-    """根目錄第一層、名稱以 12 位數字開頭的資料夾 → 依那 12 碼分組（只列一次根目錄，公槽上比逐檔查快）。"""
+def find_product_folders(root: Path, wanted: set[str]) -> tuple[dict[str, list[Path]], list[Path]]:
+    """根目錄底下任何深度、名稱剛好等於 TDCC 的資料夾（只走一次樹），以及讀不到的資料夾。"""
     found: dict[str, list[Path]] = {}
-    with os.scandir(root) as entries:
-        for entry in entries:
-            m = _FOLDER.match(entry.name)
-            if m and entry.is_dir():
-                found.setdefault(m.group(), []).append(Path(entry.path))
-    return found
+    unreadable: list[Path] = []
+    if not wanted:
+        return found, unreadable
+    for dirpath, dirnames, _ in os.walk(root, onerror=lambda e: unreadable.append(Path(e.filename))):
+        dirnames.sort()
+        for name in dirnames:
+            if name in wanted:
+                found.setdefault(name, []).append(Path(dirpath) / name)
+    return found, unreadable
 
 
-def locate(tdcc: str, folders: dict[str, list[Path]]) -> Lookup:
+def locate(tdcc: str, folders: list[Path], unreadable: Sequence[Path] = ()) -> Lookup:
     found = Lookup(tdcc)
-    candidates = folders.get(tdcc, [])
-    exact = [p for p in candidates if p.name == tdcc]
-    if exact:
-        found.folder = exact[0]
-    elif len(candidates) == 1:
-        found.folder = candidates[0]
-    elif candidates:
-        found.problems.append("有多個資料夾：" + "、".join(p.name for p in candidates))
+    if not folders:
+        reason = "找不到商品資料夾"
+        if unreadable:
+            reason += f"（搜尋時有 {len(unreadable)} 個資料夾讀不到，例如 {unreadable[0]}）"
+        found.problems.append(reason)
         return found
-    else:
-        found.problems.append("根目錄沒有這個 TDCC 資料夾")
+    if len(folders) > 1:
+        found.problems.append(f"找到 {len(folders)} 個同名商品資料夾：" + "、".join(str(f) for f in folders))
         return found
+    found.folder = folders[0]
     for kind in KINDS:
         hits = _find_file(found.folder, f"{tdcc}_{kind}.pdf")
         if len(hits) == 1:
@@ -118,12 +117,15 @@ def fetch(
     dest: Path,
     on_each: Callable[[Lookup], None] | None = None,
 ) -> list[Lookup]:
-    """逐檔找、逐檔複製；每處理完一檔呼叫 `on_each`（畫面用來即時更新）。根目錄讀不到時直接拋 OSError。"""
-    folders = folders_by_code(root)
+    """先走一次根目錄找商品資料夾，再逐檔複製；每處理完一檔呼叫 `on_each`（畫面用來即時更新）。"""
+    codes = list(tdccs)
+    if not root.is_dir():
+        raise OSError(f"根目錄不存在或讀不到：{root}")
+    folders, unreadable = find_product_folders(root, set(codes))
     dest.mkdir(parents=True, exist_ok=True)
     results = []
-    for tdcc in tdccs:
-        found = locate(tdcc, folders)
+    for tdcc in codes:
+        found = locate(tdcc, folders.get(tdcc, []), unreadable)
         copy_into(found, dest)
         results.append(found)
         if on_each:

@@ -1,4 +1,4 @@
-"""公槽 TS／IIS 抓取視窗：貼上 TDCC → 依商品的根目錄找檔 → 複製到目的資料夾。"""
+"""公槽 TS／IIS 抓取視窗：貼上 TDCC → 在根目錄底下找商品資料夾 → 複製到目的資料夾。"""
 
 from __future__ import annotations
 
@@ -9,50 +9,66 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import settings as store
+from . import settings
 from .fetch import KINDS, Lookup, fetch, parse_tdccs
 
+TITLE = "公槽 TS／IIS 抓取"
 FONT = ("Microsoft JhengHei UI", 10)
+
+
+class FolderBar:
+    """一列「標題｜路徑（唯讀）｜變更…」：跟 FCN Workflow 的根目錄一樣只能用按鈕改，避免打錯；選了就記住。"""
+
+    def __init__(self, parent: tk.Misc, row: int, label: str, key: str, dialog_title: str, missing: str) -> None:
+        self.key, self.dialog_title = key, dialog_title
+        self.var = tk.StringVar(value=settings.load_folders().get(key, ""))
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        ttk.Entry(parent, textvariable=self.var, state="readonly").grid(row=row, column=1, sticky="ew", pady=4)
+        ttk.Button(parent, text="變更…", command=self.change).grid(row=row, column=2, padx=8, pady=4)
+        warning = ttk.Label(parent, text=missing, foreground="#B00020")
+
+        def show_missing(*_args: object) -> None:
+            if self.var.get().strip():
+                warning.grid_remove()
+            else:
+                warning.grid(row=row, column=3, sticky="w", padx=(0, 8))
+
+        self.var.trace_add("write", show_missing)
+        show_missing()
+
+    def change(self) -> None:
+        chosen = filedialog.askdirectory(title=self.dialog_title, initialdir=self.var.get() or None, mustexist=True)
+        if chosen:  # 按取消不動
+            self.var.set(str(Path(chosen)))
+            settings.remember(**{self.key: self.var.get()})
+
+    def path(self) -> Path | None:
+        text = self.var.get().strip()
+        return Path(text) if text else None
 
 
 class App:
     def __init__(self, win: tk.Tk) -> None:
         self.win = win
-        self.cfg = store.load()
         self.events: queue.Queue = queue.Queue()
         self.results: list[Lookup] = []
         self.running = False
-        self.shown = ""  # 根目錄欄位目前顯示的是哪個商品
 
-        win.title("公槽 TS／IIS 抓取")
+        win.title(TITLE)
         win.geometry("1000x620")
         win.option_add("*Font", FONT)
         ttk.Style().configure("Treeview", rowheight=24)
         win.columnconfigure(1, weight=1)
-        win.rowconfigure(4, weight=1)
+        win.rowconfigure(3, weight=1)
 
-        ttk.Label(win, text="商品").grid(row=0, column=0, sticky="w", padx=8, pady=(10, 4))
-        self.product = tk.StringVar(value=self.cfg.product)
-        self.box = ttk.Combobox(win, textvariable=self.product, values=self.cfg.products, width=14)
-        self.box.grid(row=0, column=1, sticky="w", pady=(10, 4))
-        self.box.bind("<<ComboboxSelected>>", lambda _e: self._show_root())
-        self.box.bind("<FocusOut>", lambda _e: self._show_root())
-
-        ttk.Label(win, text="公槽根目錄").grid(row=1, column=0, sticky="w", padx=8, pady=4)
-        self.root_dir = tk.StringVar()
-        ttk.Entry(win, textvariable=self.root_dir).grid(row=1, column=1, sticky="ew", pady=4)
-        ttk.Button(win, text="選擇…", command=self._pick_root).grid(row=1, column=2, padx=8, pady=4)
-
-        ttk.Label(win, text="複製到").grid(row=2, column=0, sticky="w", padx=8, pady=4)
-        self.dest = tk.StringVar(value=self.cfg.dest)
-        ttk.Entry(win, textvariable=self.dest).grid(row=2, column=1, sticky="ew", pady=4)
-        ttk.Button(win, text="選擇…", command=self._pick_dest).grid(row=2, column=2, padx=8, pady=4)
+        self.root = FolderBar(win, 0, "根目錄", "root", "選擇商品資料夾所在的根目錄", "尚未設定")
+        self.dest = FolderBar(win, 1, "複製到", "dest", "選擇要複製到哪個資料夾", "尚未設定")
 
         ttk.Label(win, text="TDCC（從庫存表整欄貼上即可，一行一個、空白或逗號分隔都可以）").grid(
-            row=3, column=0, columnspan=3, sticky="w", padx=8, pady=(8, 2)
+            row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(8, 2)
         )
         body = ttk.Frame(win)
-        body.grid(row=4, column=0, columnspan=3, sticky="nsew", padx=8)
+        body.grid(row=3, column=0, columnspan=4, sticky="nsew", padx=8)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
         self.text = tk.Text(body, width=18, undo=True)
@@ -71,7 +87,7 @@ class App:
         self.table.configure(yscrollcommand=bar.set)
 
         foot = ttk.Frame(win)
-        foot.grid(row=5, column=0, columnspan=3, sticky="ew", padx=8, pady=10)
+        foot.grid(row=4, column=0, columnspan=4, sticky="ew", padx=8, pady=10)
         foot.columnconfigure(3, weight=1)
         self.start = ttk.Button(foot, text="開始抓取", command=self._start)
         self.start.grid(row=0, column=0)
@@ -79,35 +95,6 @@ class App:
         ttk.Button(foot, text="開啟目的資料夾", command=self._open_dest).grid(row=0, column=2)
         self.note = tk.StringVar(value="已辨識 0 檔")
         ttk.Label(foot, textvariable=self.note).grid(row=0, column=3, sticky="e")
-
-        self._show_root()
-        win.protocol("WM_DELETE_WINDOW", self._close)
-
-    def _show_root(self) -> None:
-        """換商品時先記下前一個商品畫面上的根目錄，再顯示新商品的。"""
-        if self.shown:
-            self.cfg.roots[self.shown] = self.root_dir.get().strip()
-        self.shown = self.product.get().strip()
-        self.root_dir.set(self.cfg.roots.get(self.shown, ""))
-
-    def _remember(self) -> None:
-        name = self.product.get().strip()
-        if name:
-            self.cfg.roots[name] = self.root_dir.get().strip()
-            self.cfg.product = name
-        self.cfg.dest = self.dest.get().strip()
-        store.save(self.cfg)
-        self.box.configure(values=self.cfg.products)  # 輸入的新商品加進下拉選單
-
-    def _pick_root(self) -> None:
-        folder = filedialog.askdirectory(initialdir=self.root_dir.get() or None, title="選擇公槽根目錄")
-        if folder:
-            self.root_dir.set(str(Path(folder)))
-
-    def _pick_dest(self) -> None:
-        folder = filedialog.askdirectory(initialdir=self.dest.get() or None, title="選擇要複製到哪個資料夾")
-        if folder:
-            self.dest.set(str(Path(folder)))
 
     def _on_text(self, _event: object) -> None:
         if self.text.edit_modified():
@@ -118,28 +105,25 @@ class App:
         if self.running:
             return
         tdccs = parse_tdccs(self.text.get("1.0", "end"))
-        root, dest = self.root_dir.get().strip(), self.dest.get().strip()
-        if not self.product.get().strip():
-            return messagebox.showwarning("缺商品", "請先選商品（或輸入新商品名稱）。")
+        root, dest = self.root.path(), self.dest.path()
+        if root is None:
+            return messagebox.showerror(TITLE, "請先按根目錄旁的「變更…」設定根目錄。")
+        if dest is None:
+            return messagebox.showerror(TITLE, "請先按「複製到」旁的「變更…」選擇目的資料夾。")
         if not tdccs:
-            return messagebox.showwarning("沒有 TDCC", "貼上的內容裡找不到 12 位數字的 TDCC。")
-        if not root or not Path(root).is_dir():
-            return messagebox.showwarning("根目錄", "公槽根目錄不存在或讀不到，請重新選擇。")
-        if not dest:
-            return messagebox.showwarning("目的資料夾", "請選擇要複製到哪個資料夾。")
-        if Path(dest).resolve() == Path(root).resolve():
-            return messagebox.showwarning("目的資料夾", "目的資料夾不能是公槽根目錄。")
-        self._remember()
+            return messagebox.showerror(TITLE, "貼上的內容裡找不到 12 位數字的 TDCC。")
+        if dest.resolve().is_relative_to(root.resolve()):
+            return messagebox.showerror(TITLE, "目的資料夾不能在根目錄底下（會被當成商品資料夾搜尋）。")
         self.table.delete(*self.table.get_children())
         self.results = []
         self.running = True
         self.start.state(["disabled"])
-        self.note.set(f"抓取中… 0／{len(tdccs)}")
         total = len(tdccs)
+        self.note.set(f"搜尋根目錄中…（共 {total} 檔）")
 
         def work() -> None:
             try:
-                fetch(Path(root), tdccs, Path(dest), on_each=lambda f: self.events.put(("one", f, total)))
+                fetch(root, tdccs, dest, on_each=lambda f: self.events.put(("one", f, total)))
             except OSError as e:
                 self.events.put(("error", e, total))
             self.events.put(("done", None, total))
@@ -160,9 +144,9 @@ class App:
                     values=(item.tdcc, *(item.mark(k) for k in KINDS), item.status),
                     tags=() if item.ok else ("bad",),
                 )
-                self.note.set(f"抓取中… {len(self.results)}／{total}")
+                self.note.set(f"複製中… {len(self.results)}／{total}")
             elif kind == "error":
-                messagebox.showerror("讀不到公槽", f"讀取根目錄失敗：{item}")
+                messagebox.showerror(TITLE, str(item))
             else:
                 self.running = False
                 self.start.state(["!disabled"])
@@ -178,13 +162,9 @@ class App:
         self.note.set(f"已複製 {len(missing)} 個缺件 TDCC")
 
     def _open_dest(self) -> None:
-        dest = self.dest.get().strip()
-        if dest and Path(dest).is_dir():
+        dest = self.dest.path()
+        if dest and dest.is_dir():
             os.startfile(dest)  # noqa: S606 — Windows 開資料夾
-
-    def _close(self) -> None:
-        self._remember()
-        self.win.destroy()
 
 
 def main() -> None:
