@@ -1,4 +1,4 @@
-"""公槽 TS／IIS 抓取視窗：貼上 TDCC → 在根目錄底下找商品資料夾 → 複製到目的資料夾。"""
+"""公槽 TS／IIS／Order 信抓取視窗：貼上 TDCC → 在根目錄底下找商品資料夾 → 複製到目的資料夾。"""
 
 from __future__ import annotations
 
@@ -9,11 +9,17 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import settings
-from .fetch import KINDS, Lookup, fetch, parse_tdccs
+from . import orders, settings
+from .fetch import KINDS, fetch, parse_tdccs
 
-TITLE = "公槽 TS／IIS 抓取"
+TITLE = "公槽 TS／IIS／Order 信抓取"
 FONT = ("Microsoft JhengHei UI", 10)
+JOBS = {  # 按鈕文字 →（結果表中間的欄位、抓取函式）
+    "抓 TS／IIS": (KINDS, fetch),
+    "抓 Order 信": (orders.KINDS, orders.fetch_orders),
+}
+HEADINGS = {"tdcc": "TDCC", "TS": "TS", "IIS": "IIS", "Order": "Order 信", "status": "狀態"}
+WIDTHS = {"tdcc": 130, "status": 500}
 
 
 class FolderBar:
@@ -51,7 +57,7 @@ class App:
     def __init__(self, win: tk.Tk) -> None:
         self.win = win
         self.events: queue.Queue = queue.Queue()
-        self.results: list[Lookup] = []
+        self.results: list = []  # fetch.Lookup 或 orders.OrderLookup
         self.running = False
 
         win.title(TITLE)
@@ -75,11 +81,8 @@ class App:
         self.text.grid(row=0, column=0, sticky="ns")
         self.text.bind("<<Modified>>", self._on_text)
 
-        cols = ("tdcc", *KINDS, "status")
-        self.table = ttk.Treeview(body, columns=cols, show="headings")
-        for col, title, width in zip(cols, ("TDCC", "TS", "IIS", "狀態"), (130, 60, 60, 500)):
-            self.table.heading(col, text=title)
-            self.table.column(col, width=width, anchor="w" if col in ("tdcc", "status") else "center")
+        self.table = ttk.Treeview(body, show="headings")
+        self._set_columns(KINDS)
         self.table.tag_configure("bad", foreground="#B00020")
         self.table.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         bar = ttk.Scrollbar(body, orient="vertical", command=self.table.yview)
@@ -88,20 +91,31 @@ class App:
 
         foot = ttk.Frame(win)
         foot.grid(row=4, column=0, columnspan=4, sticky="ew", padx=8, pady=10)
-        foot.columnconfigure(3, weight=1)
-        self.start = ttk.Button(foot, text="開始抓取", command=self._start)
-        self.start.grid(row=0, column=0)
-        ttk.Button(foot, text="複製缺件的 TDCC", command=self._copy_missing).grid(row=0, column=1, padx=8)
-        ttk.Button(foot, text="開啟目的資料夾", command=self._open_dest).grid(row=0, column=2)
+        foot.columnconfigure(len(JOBS) + 2, weight=1)
+        self.starts = []
+        for i, label in enumerate(JOBS):
+            button = ttk.Button(foot, text=label, command=lambda label=label: self._start(label))
+            button.grid(row=0, column=i, padx=(0, 8))
+            self.starts.append(button)
+        ttk.Button(foot, text="複製缺件的 TDCC", command=self._copy_missing).grid(row=0, column=len(JOBS), padx=(0, 8))
+        ttk.Button(foot, text="開啟目的資料夾", command=self._open_dest).grid(row=0, column=len(JOBS) + 1)
         self.note = tk.StringVar(value="已辨識 0 檔")
-        ttk.Label(foot, textvariable=self.note).grid(row=0, column=3, sticky="e")
+        ttk.Label(foot, textvariable=self.note).grid(row=0, column=len(JOBS) + 2, sticky="e")
+
+    def _set_columns(self, kinds: tuple[str, ...]) -> None:
+        self.kinds = kinds
+        cols = ("tdcc", *kinds, "status")
+        self.table.configure(columns=cols)
+        for col in cols:
+            self.table.heading(col, text=HEADINGS[col])
+            self.table.column(col, width=WIDTHS.get(col, 70), anchor="w" if col in WIDTHS else "center")
 
     def _on_text(self, _event: object) -> None:
         if self.text.edit_modified():
             self.note.set(f"已辨識 {len(parse_tdccs(self.text.get('1.0', 'end')))} 檔")
             self.text.edit_modified(False)
 
-    def _start(self) -> None:
+    def _start(self, job: str) -> None:
         if self.running:
             return
         tdccs = parse_tdccs(self.text.get("1.0", "end"))
@@ -114,16 +128,19 @@ class App:
             return messagebox.showerror(TITLE, "貼上的內容裡找不到 12 位數字的 TDCC。")
         if dest.resolve().is_relative_to(root.resolve()):
             return messagebox.showerror(TITLE, "目的資料夾不能在根目錄底下（會被當成商品資料夾搜尋）。")
+        kinds, run = JOBS[job]
         self.table.delete(*self.table.get_children())
+        self._set_columns(kinds)
         self.results = []
         self.running = True
-        self.start.state(["disabled"])
+        for button in self.starts:
+            button.state(["disabled"])
         total = len(tdccs)
         self.note.set(f"搜尋根目錄中…（共 {total} 檔）")
 
         def work() -> None:
             try:
-                fetch(root, tdccs, dest, on_each=lambda f: self.events.put(("one", f, total)))
+                run(root, tdccs, dest, on_each=lambda f: self.events.put(("one", f, total)))
             except OSError as e:
                 self.events.put(("error", e, total))
             self.events.put(("done", None, total))
@@ -141,7 +158,7 @@ class App:
                 self.results.append(item)
                 self.table.insert(
                     "", "end",
-                    values=(item.tdcc, *(item.mark(k) for k in KINDS), item.status),
+                    values=(item.tdcc, *(item.mark(k) for k in self.kinds), item.status),
                     tags=() if item.ok else ("bad",),
                 )
                 self.note.set(f"複製中… {len(self.results)}／{total}")
@@ -149,7 +166,8 @@ class App:
                 messagebox.showerror(TITLE, str(item))
             else:
                 self.running = False
-                self.start.state(["!disabled"])
+                for button in self.starts:
+                    button.state(["!disabled"])
                 bad = sum(not r.ok for r in self.results)
                 self.note.set(f"完成 {len(self.results) - bad}／{total}，缺件 {bad}")
                 return
