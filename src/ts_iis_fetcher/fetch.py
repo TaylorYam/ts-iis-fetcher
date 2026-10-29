@@ -12,7 +12,9 @@ import shutil
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypeVar
 
+T = TypeVar("T")
 KINDS = ("TS", "IIS")
 _CODE = re.compile(r"(?<!\d)\d{11,12}(?!\d)")
 
@@ -69,18 +71,24 @@ def find_product_folders(root: Path, wanted: set[str]) -> tuple[dict[str, list[P
     return found, unreadable
 
 
-def locate(tdcc: str, folders: list[Path], unreadable: Sequence[Path] = ()) -> Lookup:
-    found = Lookup(tdcc)
+def pick_folder(folders: list[Path], unreadable: Sequence[Path] = ()) -> tuple[Path | None, str | None]:
+    """唯一的商品資料夾；找不到或有多個同名資料夾時不猜，回傳原因。"""
     if not folders:
         reason = "找不到商品資料夾"
         if unreadable:
             reason += f"（搜尋時有 {len(unreadable)} 個資料夾讀不到，例如 {unreadable[0]}）"
+        return None, reason
+    if len(folders) > 1:
+        return None, f"找到 {len(folders)} 個同名商品資料夾：" + "、".join(str(f) for f in folders)
+    return folders[0], None
+
+
+def locate(tdcc: str, folders: list[Path], unreadable: Sequence[Path] = ()) -> Lookup:
+    found = Lookup(tdcc)
+    found.folder, reason = pick_folder(folders, unreadable)
+    if reason:
         found.problems.append(reason)
         return found
-    if len(folders) > 1:
-        found.problems.append(f"找到 {len(folders)} 個同名商品資料夾：" + "、".join(str(f) for f in folders))
-        return found
-    found.folder = folders[0]
     for kind in KINDS:
         hits = _find_file(found.folder, f"{tdcc}_{kind}.pdf")
         if len(hits) == 1:
@@ -117,7 +125,24 @@ def fetch(
     dest: Path,
     on_each: Callable[[Lookup], None] | None = None,
 ) -> list[Lookup]:
-    """先走一次根目錄找商品資料夾，再逐檔複製；每處理完一檔呼叫 `on_each`（畫面用來即時更新）。"""
+    """依 TDCC 抓 TS／IIS；每處理完一檔呼叫 `on_each`（畫面用來即時更新）。"""
+
+    def one(tdcc: str, folders: list[Path], unreadable: Sequence[Path]) -> Lookup:
+        found = locate(tdcc, folders, unreadable)
+        copy_into(found, dest)
+        return found
+
+    return run_batch(root, tdccs, dest, one, on_each)
+
+
+def run_batch(
+    root: Path,
+    tdccs: Iterable[str],
+    dest: Path,
+    one: Callable[[str, list[Path], Sequence[Path]], T],
+    on_each: Callable[[T], None] | None = None,
+) -> list[T]:
+    """先走一次根目錄找商品資料夾，再逐檔交給 `one`（找檔＋複製）；每處理完一檔呼叫 `on_each`。"""
     codes = list(tdccs)
     if not root.is_dir():
         raise OSError(f"根目錄不存在或讀不到：{root}")
@@ -125,8 +150,7 @@ def fetch(
     dest.mkdir(parents=True, exist_ok=True)
     results = []
     for tdcc in codes:
-        found = locate(tdcc, folders.get(tdcc, []), unreadable)
-        copy_into(found, dest)
+        found = one(tdcc, folders.get(tdcc, []), unreadable)
         results.append(found)
         if on_each:
             on_each(found)
